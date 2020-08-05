@@ -95,7 +95,6 @@ with open("data/netflix_titles.csv", newline='') as csvfile:
         db_record.__dict__[key] = netflix_record.__dict__[key]
       session.commit()
     else:
-      pass
       session.add(netflix_record)
       session.commit()
 
