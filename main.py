@@ -8,6 +8,8 @@ from sqlalchemy import Column, String, Integer, ARRAY
 from sqlalchemy.ext.declarative import declarative_base  
 from sqlalchemy.orm import sessionmaker
 
+from jaeger_client import Config
+
 start_time = time.time()
 
 load_dotenv()
@@ -59,6 +61,20 @@ def build_netflix_record(record):
     description = record["description"]
   )
 
+def init_tracer(service):
+  config = Config(
+    config={
+      'sampler': {
+        'type': 'const',
+        'param': 1,
+      },
+      'logging': True,
+    },
+    service_name=service,
+  )
+
+  return config.initialize_tracer()
+
 def enrich_record(record):
   clone_record = record.copy()
   for key, value in clone_record.items():
@@ -79,6 +95,7 @@ def read_record(session):
   for record in records:
     print(f'{record.show_id} - {record.title}')
 
+tracer = init_tracer("gallery-db-prep")
 
 Session = sessionmaker(db)  
 session = Session()
@@ -87,16 +104,26 @@ base.metadata.create_all(db)
 
 with open("data/netflix_titles.csv", newline='') as csvfile:
   dictreader = csv.DictReader(csvfile)
-  for row in dictreader:
-    netflix_record = build_netflix_record(enrich_record(dict(row)))
-    db_record = session.query(NetflixRecord).filter(NetflixRecord.show_id == netflix_record.show_id).first()
-    if db_record:
-      for key, value in netflix_record.__dict__.items():
-        db_record.__dict__[key] = netflix_record.__dict__[key]
-      session.commit()
-    else:
-      session.add(netflix_record)
-      session.commit()
+  with tracer.start_span('record-insertion') as p_span:
+    for row in dictreader:
+      enriched_record = enrich_record(dict(row))
+      netflix_record = build_netflix_record(enriched_record)
+      with tracer.start_span(f'record-insertion-{netflix_record.title}', child_of=p_span) as span:
+        span.set_tag('record_id', netflix_record.show_id)
+        span.set_tag('record_title', netflix_record.title)
+        span.log_kv(enrich_record(dict(row)))
+        db_record = session.query(NetflixRecord).filter(NetflixRecord.show_id == netflix_record.show_id).first()
+        if db_record:
+          for key, value in netflix_record.__dict__.items():
+            db_record.__dict__[key] = netflix_record.__dict__[key]
+          session.commit()
+        else:
+          session.add(netflix_record)
+          session.commit()
 
 stop_time = time.time() - start_time
+
+time.sleep(2)
+tracer.close()
+
 print(f'Done in {stop_time}')
